@@ -324,3 +324,25 @@ export const videoWatchEvents = sqliteTable("video_watch_events", {
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
 });
+
+// Course announcements: one-way broadcasts from a course's staff to its
+// enrolled students. Immutable once posted — no updatedAt, no deletedAt.
+export const announcements = sqliteTable(
+  "announcements",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    courseId: integer("course_id")
+      .notNull()
+      .references(() => courses.id),
+    authorId: integer("author_id")
+      .notNull()
+      .references(() => users.id),
+    title: text("title").notNull(),
+    // Raw Markdown. Rendered with renderComment (untrusted input).
+    body: text("body").notNull(),
+    createdAt: text("created_at")
+      .notNull()
+      .$defaultFn(() => new Date().toISOString()),
+  },
+  (table) => [index("announcements_course_idx").on(table.courseId)]
+);

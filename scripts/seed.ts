@@ -45,6 +45,7 @@ async function seed() {
 
   // Drop and recreate tables for a clean seed
   sqlite.exec(`
+    DROP TABLE IF EXISTS announcements;
     DROP TABLE IF EXISTS comments;
     DROP TABLE IF EXISTS course_ratings;
     DROP TABLE IF EXISTS video_watch_events;
@@ -1589,6 +1590,38 @@ You've completed the Building REST APIs course. You now have the skills to build
 
   console.log("Created 15 lesson comments across 9 threads.");
 
+  // ─── Course Announcements ───
+  // Spread across both courses and over time, so the staff list has an order
+  // to show and some announcements predate later students' enrollments.
+
+  db.insert(schema.announcements)
+    .values([
+      {
+        courseId: course1.id,
+        authorId: instructor1.id,
+        title: "Welcome to Introduction to TypeScript",
+        body: "Thanks for joining! Start with **Module 1** and work through the lessons in order.\n\nQuestions? Ask them in the lesson comments.",
+        createdAt: daysAgo(45),
+      },
+      {
+        courseId: course1.id,
+        authorId: instructor1.id,
+        title: "New lesson on generics",
+        body: "I've added a lesson on generic constraints. See the [TypeScript handbook](https://www.typescriptlang.org/docs/handbook/2/generics.html) for background reading.",
+        createdAt: daysAgo(10),
+      },
+      {
+        courseId: course2.id,
+        authorId: instructor2.id,
+        title: "Quiz fix",
+        body: "One of the quiz answers was marked wrong by mistake. It's fixed now:\n\n- Retake the quiz if you lost points\n- Your best score counts",
+        createdAt: daysAgo(20),
+      },
+    ])
+    .run();
+
+  console.log("Created 3 course announcements.");
+
   // ─── Lesson Progress ───
 
   // Helper to mark lessons as complete
@@ -1923,6 +1956,7 @@ You've completed the Building REST APIs course. You now have the skills to build
   console.log("  Enrollments: 7");
   console.log("  Course ratings: 6");
   console.log("  Lesson comments: 15 (4 questions awaiting an answer)");
+  console.log("  Announcements: 3");
   console.log("  Purchases: 6 (5 individual + 1 team)");
   console.log("  Teams: 1 (with 5 coupons)");
 }

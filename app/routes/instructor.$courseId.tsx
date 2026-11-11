@@ -36,14 +36,25 @@ import {
 import { getEnrollmentCountForCourse, getCourseEnrolledStudents } from "~/services/enrollmentService";
 import { calculateProgress } from "~/services/progressService";
 import { getQuizByLessonId, getBestAttempt } from "~/services/quizService";
-import { getCurrentUserId } from "~/lib/session";
 import { getUserById } from "~/services/userService";
-import { CourseStatus, UserRole } from "~/db/schema";
+import {
+  createAnnouncement,
+  getCourseAnnouncements,
+} from "~/services/announcementService";
+import { requireStaff } from "~/lib/access.server";
+import { renderComment } from "~/lib/comment-markdown.server";
+import {
+  MAX_ANNOUNCEMENT_TITLE_LENGTH,
+  MAX_ANNOUNCEMENT_BODY_LENGTH,
+} from "~/lib/announcements";
+import { CourseStatus } from "~/db/schema";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { MonacoMarkdownEditor } from "~/components/monaco-markdown-editor";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
+import { Textarea } from "~/components/ui/textarea";
+import { Label } from "~/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -69,6 +80,8 @@ import {
   Award,
   Globe,
   FileText,
+  Megaphone,
+  Send,
 } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
@@ -94,6 +107,8 @@ const courseEditorActionSchema = z.discriminatedUnion("intent", [
   z.object({ intent: z.literal("move-lesson"), lessonId: z.coerce.number().int(), targetModuleId: z.coerce.number().int(), targetPosition: z.coerce.number().int() }),
   z.object({ intent: z.literal("delete-lesson"), lessonId: z.coerce.number().int() }),
   z.object({ intent: z.literal("update-sales-copy"), salesCopy: z.string().trim().min(1, "Sales copy cannot be empty.") }),
+  // Title and body rules live in announcementService, so the errors come back per field.
+  z.object({ intent: z.literal("post-announcement"), title: z.string(), body: z.string() }),
 ]);
 
 export function meta({ loaderData }: Route.MetaArgs) {
@@ -105,26 +120,9 @@ export function meta({ loaderData }: Route.MetaArgs) {
 }
 
 export async function loader({ params, request }: Route.LoaderArgs) {
-  const currentUserId = await getCurrentUserId(request);
+  const { courseId } = parseParams(params, courseEditorParamsSchema);
 
-  if (!currentUserId) {
-    throw data("Select a user from the DevUI panel to manage courses.", {
-      status: 401,
-    });
-  }
-
-  const user = getUserById(currentUserId);
-
-  if (!user || (user.role !== UserRole.Instructor && user.role !== UserRole.Admin)) {
-    throw data("Only instructors and admins can access this page.", {
-      status: 403,
-    });
-  }
-
-  const courseId = parseInt(params.courseId, 10);
-  if (isNaN(courseId)) {
-    throw data("Invalid course ID.", { status: 400 });
-  }
+  await requireStaff(request, courseId);
 
   const course = getCourseWithDetails(courseId);
 
@@ -132,9 +130,15 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     throw data("Course not found.", { status: 404 });
   }
 
-  if (course.instructorId !== currentUserId && user.role !== UserRole.Admin) {
-    throw data("You can only edit your own courses.", { status: 403 });
-  }
+  // Announcement bodies are rendered as untrusted Markdown, like comments.
+  const announcements = await Promise.all(
+    getCourseAnnouncements(courseId).map(async (announcement) => ({
+      id: announcement.id,
+      title: announcement.title,
+      createdAt: announcement.createdAt,
+      bodyHtml: await renderComment(announcement.body),
+    }))
+  );
 
   const lessonCount = getLessonCountForCourse(courseId);
   const enrollmentCount = getEnrollmentCountForCourse(courseId);
@@ -185,30 +189,24 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 
   const quizCount = lessonQuizzes.length;
 
-  return { course, lessonCount, enrollmentCount, students, quizCount };
+  return {
+    course,
+    lessonCount,
+    enrollmentCount,
+    students,
+    quizCount,
+    announcements,
+  };
 }
 
 export async function action({ params, request }: Route.ActionArgs) {
-  const currentUserId = await getCurrentUserId(request);
-
-  if (!currentUserId) {
-    throw data("You must be logged in.", { status: 401 });
-  }
-
-  const user = getUserById(currentUserId);
-  if (!user || (user.role !== UserRole.Instructor && user.role !== UserRole.Admin)) {
-    throw data("Only instructors and admins can edit courses.", { status: 403 });
-  }
-
   const { courseId } = parseParams(params, courseEditorParamsSchema);
+
+  const access = await requireStaff(request, courseId);
 
   const course = getCourseById(courseId);
   if (!course) {
     throw data("Course not found.", { status: 404 });
-  }
-
-  if (course.instructorId !== currentUserId && user.role !== UserRole.Admin) {
-    throw data("You can only edit your own courses.", { status: 403 });
   }
 
   const formData = await request.formData();
@@ -355,6 +353,22 @@ export async function action({ params, request }: Route.ActionArgs) {
   if (intent === "update-sales-copy") {
     updateCourseSalesCopy(courseId, parsed.data.salesCopy);
     return { success: true, field: "sales-copy" };
+  }
+
+  if (intent === "post-announcement") {
+    const result = createAnnouncement({
+      courseId,
+      authorId: access.userId!,
+      title: parsed.data.title,
+      body: parsed.data.body,
+    });
+    if (!result.success) {
+      return data(
+        { fieldErrors: result.errors },
+        { status: 400 }
+      );
+    }
+    return { success: true, field: "announcement" };
   }
 
   throw data("Invalid action.", { status: 400 });
@@ -968,6 +982,223 @@ function AddLessonForm({ moduleId }: { moduleId: number }) {
   );
 }
 
+type AnnouncementListItem = {
+  id: number;
+  title: string;
+  createdAt: string;
+  bodyHtml: string;
+};
+
+type AnnouncementFieldErrors = { title?: string; body?: string };
+
+/**
+ * Compose → confirm → post. Announcements can't be edited or deleted, so the
+ * confirm step (with the current reach) is the safeguard against mistakes.
+ */
+function AnnouncementsTab({
+  announcements,
+  enrollmentCount,
+}: {
+  announcements: AnnouncementListItem[];
+  enrollmentCount: number;
+}) {
+  const fetcher = useFetcher<{
+    success?: boolean;
+    error?: string;
+    fieldErrors?: AnnouncementFieldErrors;
+  }>();
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [confirming, setConfirming] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<AnnouncementFieldErrors>({});
+
+  const isPosting = fetcher.state !== "idle";
+
+  useEffect(() => {
+    if (fetcher.state !== "idle" || !fetcher.data) return;
+    if (fetcher.data.success) {
+      setTitle("");
+      setBody("");
+      setFieldErrors({});
+      setConfirming(false);
+      toast.success("Announcement posted.");
+    } else if (fetcher.data.fieldErrors) {
+      setFieldErrors(fetcher.data.fieldErrors);
+      setConfirming(false);
+    } else if (fetcher.data.error) {
+      toast.error(fetcher.data.error);
+      setConfirming(false);
+    }
+  }, [fetcher.state, fetcher.data]);
+
+  function validate(): AnnouncementFieldErrors {
+    const errors: AnnouncementFieldErrors = {};
+    const trimmedTitle = title.trim();
+    const trimmedBody = body.trim();
+    if (!trimmedTitle) {
+      errors.title = "Title is required";
+    } else if (trimmedTitle.length > MAX_ANNOUNCEMENT_TITLE_LENGTH) {
+      errors.title = `Title must be ${MAX_ANNOUNCEMENT_TITLE_LENGTH} characters or fewer`;
+    }
+    if (!trimmedBody) {
+      errors.body = "Body is required";
+    } else if (trimmedBody.length > MAX_ANNOUNCEMENT_BODY_LENGTH) {
+      errors.body = `Body must be ${MAX_ANNOUNCEMENT_BODY_LENGTH.toLocaleString("en-US")} characters or fewer`;
+    }
+    return errors;
+  }
+
+  function handleReview(e: React.FormEvent) {
+    e.preventDefault();
+    const errors = validate();
+    setFieldErrors(errors);
+    if (errors.title || errors.body) return;
+    setConfirming(true);
+  }
+
+  function handleConfirm() {
+    fetcher.submit(
+      { intent: "post-announcement", title, body },
+      { method: "post" }
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <h2 className="text-lg font-semibold">New Announcement</h2>
+          <p className="text-sm text-muted-foreground">
+            Sent to everyone enrolled in this course. Announcements can't be
+            edited or deleted once posted.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleReview} className="space-y-4" noValidate>
+            <div className="space-y-2">
+              <Label htmlFor="announcement-title">Title</Label>
+              <Input
+                id="announcement-title"
+                name="title"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                disabled={confirming || isPosting}
+                aria-invalid={fieldErrors.title ? true : undefined}
+                maxLength={MAX_ANNOUNCEMENT_TITLE_LENGTH}
+              />
+              {fieldErrors.title && (
+                <p className="text-sm text-destructive">{fieldErrors.title}</p>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="announcement-body">Body (Markdown)</Label>
+              <Textarea
+                id="announcement-body"
+                name="body"
+                rows={8}
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                disabled={confirming || isPosting}
+                aria-invalid={fieldErrors.body ? true : undefined}
+              />
+              {fieldErrors.body && (
+                <p className="text-sm text-destructive">{fieldErrors.body}</p>
+              )}
+            </div>
+
+            {confirming ? (
+              <div
+                role="alert"
+                className={
+                  enrollmentCount === 0
+                    ? "rounded-md border border-yellow-500/50 bg-yellow-50 p-4 dark:bg-yellow-950/30"
+                    : "rounded-md border bg-muted/50 p-4"
+                }
+              >
+                {enrollmentCount === 0 ? (
+                  <p className="flex items-center gap-2 text-sm font-medium">
+                    <AlertTriangle className="size-4 text-yellow-600" />
+                    No students are enrolled in this course, so this
+                    announcement will reach 0 students.
+                  </p>
+                ) : (
+                  <p className="text-sm font-medium">
+                    This will reach {enrollmentCount}{" "}
+                    {enrollmentCount === 1 ? "student" : "students"}.
+                  </p>
+                )}
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Once posted, it can't be edited or deleted.
+                </p>
+                <div className="mt-4 flex items-center gap-2">
+                  <Button
+                    type="button"
+                    onClick={handleConfirm}
+                    disabled={isPosting}
+                  >
+                    <Send className="mr-1.5 size-4" />
+                    {isPosting ? "Posting..." : "Confirm and Post"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => setConfirming(false)}
+                    disabled={isPosting}
+                  >
+                    Back to Editing
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <Button type="submit">
+                <Megaphone className="mr-1.5 size-4" />
+                Post
+              </Button>
+            )}
+          </form>
+        </CardContent>
+      </Card>
+
+      <div>
+        <h2 className="mb-3 text-lg font-semibold">Past Announcements</h2>
+        {announcements.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No announcements posted yet.
+          </p>
+        ) : (
+          <div className="space-y-4">
+            {announcements.map((announcement) => (
+              <Card key={announcement.id}>
+                <CardHeader>
+                  <h3 className="font-semibold">{announcement.title}</h3>
+                  <p
+                    className="text-xs text-muted-foreground"
+                    suppressHydrationWarning
+                  >
+                    {new Date(announcement.createdAt).toLocaleString(undefined, {
+                      year: "numeric",
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit",
+                    })}
+                  </p>
+                </CardHeader>
+                <CardContent>
+                  <div
+                    className="prose prose-sm prose-neutral dark:prose-invert max-w-none"
+                    dangerouslySetInnerHTML={{ __html: announcement.bodyHtml }}
+                  />
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function statusBadgeColor(status: string) {
   switch (status) {
     case CourseStatus.Published:
@@ -984,7 +1215,14 @@ function statusBadgeColor(status: string) {
 export default function InstructorCourseEditor({
   loaderData,
 }: Route.ComponentProps) {
-  const { course, lessonCount, enrollmentCount, students, quizCount } = loaderData;
+  const {
+    course,
+    lessonCount,
+    enrollmentCount,
+    students,
+    quizCount,
+    announcements,
+  } = loaderData;
   const statusFetcher = useFetcher();
   const reorderFetcher = useFetcher();
   const lessonReorderFetcher = useFetcher();
@@ -1193,6 +1431,10 @@ export default function InstructorCourseEditor({
           <TabsTrigger value="students">
             <Users className="size-4" />
             Students
+          </TabsTrigger>
+          <TabsTrigger value="announcements">
+            <Megaphone className="size-4" />
+            Announcements
           </TabsTrigger>
         </TabsList>
 
@@ -1662,6 +1904,14 @@ export default function InstructorCourseEditor({
               </CardContent>
             </Card>
           )}
+        </TabsContent>
+
+        {/* Announcements Tab */}
+        <TabsContent value="announcements" className="mt-6">
+          <AnnouncementsTab
+            announcements={announcements}
+            enrollmentCount={enrollmentCount}
+          />
         </TabsContent>
       </Tabs>
     </div>
