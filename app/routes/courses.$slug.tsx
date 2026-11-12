@@ -52,7 +52,9 @@ import {
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
 import { StarRating, StarRatingInput } from "~/components/star-rating";
 import { getAccess } from "~/lib/access.server";
-import { renderComment } from "~/lib/comment-markdown.server";
+import { toAnnouncementListItems } from "~/lib/announcements.server";
+import type { AnnouncementListItem } from "~/lib/announcements";
+import { AnnouncementCard } from "~/components/announcement-card";
 import {
   getCourseAnnouncements,
   getStudentAnnouncements,
@@ -132,14 +134,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     : access.enrolled && access.userId
       ? getStudentAnnouncements(course.id, access.userId)
       : [];
-  const announcements = await Promise.all(
-    visibleAnnouncements.map(async (announcement) => ({
-      id: announcement.id,
-      title: announcement.title,
-      createdAt: announcement.createdAt,
-      bodyHtml: await renderComment(announcement.body),
-    }))
-  );
+  const announcements = await toAnnouncementListItems(visibleAnnouncements);
 
   return {
     course: courseWithDetails,
@@ -749,41 +744,14 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
 function CourseAnnouncements({
   announcements,
 }: {
-  announcements: Array<{
-    id: number;
-    title: string;
-    createdAt: string;
-    bodyHtml: string;
-  }>;
+  announcements: AnnouncementListItem[];
 }) {
   return (
     <section>
       <h2 className="mb-4 text-2xl font-bold">Announcements</h2>
       <div className="space-y-4">
         {announcements.map((announcement) => (
-          <Card key={announcement.id}>
-            <CardHeader>
-              <h3 className="font-semibold">{announcement.title}</h3>
-              <p
-                className="text-xs text-muted-foreground"
-                suppressHydrationWarning
-              >
-                {new Date(announcement.createdAt).toLocaleString(undefined, {
-                  year: "numeric",
-                  month: "short",
-                  day: "numeric",
-                  hour: "numeric",
-                  minute: "2-digit",
-                })}
-              </p>
-            </CardHeader>
-            <CardContent>
-              <div
-                className="prose prose-sm prose-neutral dark:prose-invert max-w-none"
-                dangerouslySetInnerHTML={{ __html: announcement.bodyHtml }}
-              />
-            </CardContent>
-          </Card>
+          <AnnouncementCard key={announcement.id} announcement={announcement} />
         ))}
       </div>
     </section>

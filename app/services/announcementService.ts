@@ -2,8 +2,8 @@ import { and, eq, desc, gte } from "drizzle-orm";
 import { db } from "~/db";
 import { announcements, enrollments } from "~/db/schema";
 import {
-  MAX_ANNOUNCEMENT_TITLE_LENGTH,
-  MAX_ANNOUNCEMENT_BODY_LENGTH,
+  validateAnnouncement,
+  type AnnouncementFieldErrors,
 } from "~/lib/announcements";
 
 // ─── Announcement Service ───
@@ -12,11 +12,9 @@ import {
 
 export type Announcement = typeof announcements.$inferSelect;
 
-export type AnnouncementErrors = { title?: string; body?: string };
-
 export type CreateAnnouncementResult =
   | { success: true; announcement: Announcement }
-  | { success: false; errors: AnnouncementErrors };
+  | { success: false; errors: AnnouncementFieldErrors };
 
 export function createAnnouncement(input: {
   courseId: number;
@@ -24,21 +22,11 @@ export function createAnnouncement(input: {
   title: string;
   body: string;
 }): CreateAnnouncementResult {
-  const title = input.title.trim();
-  const body = input.body.trim();
-
-  const errors: AnnouncementErrors = {};
-  if (!title) {
-    errors.title = "Title is required";
-  } else if (title.length > MAX_ANNOUNCEMENT_TITLE_LENGTH) {
-    errors.title = `Title must be ${MAX_ANNOUNCEMENT_TITLE_LENGTH} characters or fewer`;
+  const validation = validateAnnouncement(input);
+  if (!validation.success) {
+    return { success: false, errors: validation.errors };
   }
-  if (!body) {
-    errors.body = "Body is required";
-  } else if (body.length > MAX_ANNOUNCEMENT_BODY_LENGTH) {
-    errors.body = `Body must be ${MAX_ANNOUNCEMENT_BODY_LENGTH.toLocaleString("en-US")} characters or fewer`;
-  }
-  if (errors.title || errors.body) return { success: false, errors };
+  const { title, body } = validation;
 
   const announcement = db
     .insert(announcements)

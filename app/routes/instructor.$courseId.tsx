@@ -42,19 +42,14 @@ import {
   getCourseAnnouncements,
 } from "~/services/announcementService";
 import { requireStaff } from "~/lib/access.server";
-import { renderComment } from "~/lib/comment-markdown.server";
-import {
-  MAX_ANNOUNCEMENT_TITLE_LENGTH,
-  MAX_ANNOUNCEMENT_BODY_LENGTH,
-} from "~/lib/announcements";
+import { toAnnouncementListItems } from "~/lib/announcements.server";
 import { CourseStatus } from "~/db/schema";
 import { formatDuration, formatPrice } from "~/lib/utils";
 import { MonacoMarkdownEditor } from "~/components/monaco-markdown-editor";
+import { AnnouncementsTab } from "~/components/announcements-tab";
 import { Card, CardContent, CardHeader } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
-import { Textarea } from "~/components/ui/textarea";
-import { Label } from "~/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -81,7 +76,6 @@ import {
   Globe,
   FileText,
   Megaphone,
-  Send,
 } from "lucide-react";
 import { data, isRouteErrorResponse } from "react-router";
 import { z } from "zod";
@@ -122,22 +116,18 @@ export function meta({ loaderData }: Route.MetaArgs) {
 export async function loader({ params, request }: Route.LoaderArgs) {
   const { courseId } = parseParams(params, courseEditorParamsSchema);
 
-  await requireStaff(request, courseId);
-
+  // Existence before authorization: requireStaff can't tell a missing course
+  // from someone else's, so checking it first would turn a 404 into a 403.
   const course = getCourseWithDetails(courseId);
 
   if (!course) {
     throw data("Course not found.", { status: 404 });
   }
 
-  // Announcement bodies are rendered as untrusted Markdown, like comments.
-  const announcements = await Promise.all(
-    getCourseAnnouncements(courseId).map(async (announcement) => ({
-      id: announcement.id,
-      title: announcement.title,
-      createdAt: announcement.createdAt,
-      bodyHtml: await renderComment(announcement.body),
-    }))
+  await requireStaff(request, courseId);
+
+  const announcements = await toAnnouncementListItems(
+    getCourseAnnouncements(courseId)
   );
 
   const lessonCount = getLessonCountForCourse(courseId);
@@ -202,12 +192,13 @@ export async function loader({ params, request }: Route.LoaderArgs) {
 export async function action({ params, request }: Route.ActionArgs) {
   const { courseId } = parseParams(params, courseEditorParamsSchema);
 
-  const access = await requireStaff(request, courseId);
-
+  // Existence before authorization, as in the loader.
   const course = getCourseById(courseId);
   if (!course) {
     throw data("Course not found.", { status: 404 });
   }
+
+  const access = await requireStaff(request, courseId);
 
   const formData = await request.formData();
   const parsed = parseFormData(formData, courseEditorActionSchema);
@@ -978,223 +969,6 @@ function AddLessonForm({ moduleId }: { moduleId: number }) {
       >
         Cancel
       </Button>
-    </div>
-  );
-}
-
-type AnnouncementListItem = {
-  id: number;
-  title: string;
-  createdAt: string;
-  bodyHtml: string;
-};
-
-type AnnouncementFieldErrors = { title?: string; body?: string };
-
-/**
- * Compose → confirm → post. Announcements can't be edited or deleted, so the
- * confirm step (with the current reach) is the safeguard against mistakes.
- */
-function AnnouncementsTab({
-  announcements,
-  enrollmentCount,
-}: {
-  announcements: AnnouncementListItem[];
-  enrollmentCount: number;
-}) {
-  const fetcher = useFetcher<{
-    success?: boolean;
-    error?: string;
-    fieldErrors?: AnnouncementFieldErrors;
-  }>();
-  const [title, setTitle] = useState("");
-  const [body, setBody] = useState("");
-  const [confirming, setConfirming] = useState(false);
-  const [fieldErrors, setFieldErrors] = useState<AnnouncementFieldErrors>({});
-
-  const isPosting = fetcher.state !== "idle";
-
-  useEffect(() => {
-    if (fetcher.state !== "idle" || !fetcher.data) return;
-    if (fetcher.data.success) {
-      setTitle("");
-      setBody("");
-      setFieldErrors({});
-      setConfirming(false);
-      toast.success("Announcement posted.");
-    } else if (fetcher.data.fieldErrors) {
-      setFieldErrors(fetcher.data.fieldErrors);
-      setConfirming(false);
-    } else if (fetcher.data.error) {
-      toast.error(fetcher.data.error);
-      setConfirming(false);
-    }
-  }, [fetcher.state, fetcher.data]);
-
-  function validate(): AnnouncementFieldErrors {
-    const errors: AnnouncementFieldErrors = {};
-    const trimmedTitle = title.trim();
-    const trimmedBody = body.trim();
-    if (!trimmedTitle) {
-      errors.title = "Title is required";
-    } else if (trimmedTitle.length > MAX_ANNOUNCEMENT_TITLE_LENGTH) {
-      errors.title = `Title must be ${MAX_ANNOUNCEMENT_TITLE_LENGTH} characters or fewer`;
-    }
-    if (!trimmedBody) {
-      errors.body = "Body is required";
-    } else if (trimmedBody.length > MAX_ANNOUNCEMENT_BODY_LENGTH) {
-      errors.body = `Body must be ${MAX_ANNOUNCEMENT_BODY_LENGTH.toLocaleString("en-US")} characters or fewer`;
-    }
-    return errors;
-  }
-
-  function handleReview(e: React.FormEvent) {
-    e.preventDefault();
-    const errors = validate();
-    setFieldErrors(errors);
-    if (errors.title || errors.body) return;
-    setConfirming(true);
-  }
-
-  function handleConfirm() {
-    fetcher.submit(
-      { intent: "post-announcement", title, body },
-      { method: "post" }
-    );
-  }
-
-  return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <h2 className="text-lg font-semibold">New Announcement</h2>
-          <p className="text-sm text-muted-foreground">
-            Sent to everyone enrolled in this course. Announcements can't be
-            edited or deleted once posted.
-          </p>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleReview} className="space-y-4" noValidate>
-            <div className="space-y-2">
-              <Label htmlFor="announcement-title">Title</Label>
-              <Input
-                id="announcement-title"
-                name="title"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                disabled={confirming || isPosting}
-                aria-invalid={fieldErrors.title ? true : undefined}
-                maxLength={MAX_ANNOUNCEMENT_TITLE_LENGTH}
-              />
-              {fieldErrors.title && (
-                <p className="text-sm text-destructive">{fieldErrors.title}</p>
-              )}
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="announcement-body">Body (Markdown)</Label>
-              <Textarea
-                id="announcement-body"
-                name="body"
-                rows={8}
-                value={body}
-                onChange={(e) => setBody(e.target.value)}
-                disabled={confirming || isPosting}
-                aria-invalid={fieldErrors.body ? true : undefined}
-              />
-              {fieldErrors.body && (
-                <p className="text-sm text-destructive">{fieldErrors.body}</p>
-              )}
-            </div>
-
-            {confirming ? (
-              <div
-                role="alert"
-                className={
-                  enrollmentCount === 0
-                    ? "rounded-md border border-yellow-500/50 bg-yellow-50 p-4 dark:bg-yellow-950/30"
-                    : "rounded-md border bg-muted/50 p-4"
-                }
-              >
-                {enrollmentCount === 0 ? (
-                  <p className="flex items-center gap-2 text-sm font-medium">
-                    <AlertTriangle className="size-4 text-yellow-600" />
-                    No students are enrolled in this course, so this
-                    announcement will reach 0 students.
-                  </p>
-                ) : (
-                  <p className="text-sm font-medium">
-                    This will reach {enrollmentCount}{" "}
-                    {enrollmentCount === 1 ? "student" : "students"}.
-                  </p>
-                )}
-                <p className="mt-1 text-sm text-muted-foreground">
-                  Once posted, it can't be edited or deleted.
-                </p>
-                <div className="mt-4 flex items-center gap-2">
-                  <Button
-                    type="button"
-                    onClick={handleConfirm}
-                    disabled={isPosting}
-                  >
-                    <Send className="mr-1.5 size-4" />
-                    {isPosting ? "Posting..." : "Confirm and Post"}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    onClick={() => setConfirming(false)}
-                    disabled={isPosting}
-                  >
-                    Back to Editing
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <Button type="submit">
-                <Megaphone className="mr-1.5 size-4" />
-                Post
-              </Button>
-            )}
-          </form>
-        </CardContent>
-      </Card>
-
-      <div>
-        <h2 className="mb-3 text-lg font-semibold">Past Announcements</h2>
-        {announcements.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No announcements posted yet.
-          </p>
-        ) : (
-          <div className="space-y-4">
-            {announcements.map((announcement) => (
-              <Card key={announcement.id}>
-                <CardHeader>
-                  <h3 className="font-semibold">{announcement.title}</h3>
-                  <p
-                    className="text-xs text-muted-foreground"
-                    suppressHydrationWarning
-                  >
-                    {new Date(announcement.createdAt).toLocaleString(undefined, {
-                      year: "numeric",
-                      month: "short",
-                      day: "numeric",
-                      hour: "numeric",
-                      minute: "2-digit",
-                    })}
-                  </p>
-                </CardHeader>
-                <CardContent>
-                  <div
-                    className="prose prose-sm prose-neutral dark:prose-invert max-w-none"
-                    dangerouslySetInnerHTML={{ __html: announcement.bodyHtml }}
-                  />
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
