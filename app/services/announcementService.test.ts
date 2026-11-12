@@ -15,6 +15,7 @@ vi.mock("~/db", () => ({
 import {
   createAnnouncement,
   getCourseAnnouncements,
+  getStudentAnnouncements,
 } from "./announcementService";
 
 describe("announcementService", () => {
@@ -159,6 +160,96 @@ describe("announcementService", () => {
       expect(getCourseAnnouncements(otherCourse.id).map((a) => a.title)).toEqual(
         ["Theirs"]
       );
+    });
+  });
+
+  describe("getStudentAnnouncements", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function postAt(courseId: number, title: string, at: string) {
+      vi.setSystemTime(new Date(at));
+      const result = createAnnouncement({
+        courseId,
+        authorId: base.instructor.id,
+        title,
+        body: "Body",
+      });
+      if (!result.success) throw new Error("expected success");
+      return result.announcement;
+    }
+
+    function enrollAt(userId: number, courseId: number, at: string) {
+      testDb
+        .insert(schema.enrollments)
+        .values({ userId, courseId, enrolledAt: new Date(at).toISOString() })
+        .run();
+    }
+
+    it("excludes announcements posted before the student enrolled", () => {
+      vi.useFakeTimers();
+      postAt(base.course.id, "Before", "2026-01-01T10:00:00.000Z");
+      enrollAt(base.user.id, base.course.id, "2026-02-01T10:00:00.000Z");
+      postAt(base.course.id, "At enrollment", "2026-02-01T10:00:00.000Z");
+      postAt(base.course.id, "After", "2026-03-01T10:00:00.000Z");
+
+      const titles = getStudentAnnouncements(base.course.id, base.user.id).map(
+        (a) => a.title
+      );
+
+      expect(titles).toEqual(["After", "At enrollment"]);
+    });
+
+    it("returns nothing for a user who isn't enrolled", () => {
+      vi.useFakeTimers();
+      enrollAt(base.instructor.id, base.course.id, "2026-01-01T09:00:00.000Z");
+      postAt(base.course.id, "Hello class", "2026-01-01T10:00:00.000Z");
+
+      expect(getStudentAnnouncements(base.course.id, base.user.id)).toEqual([]);
+    });
+
+    it("returns announcements newest first", () => {
+      vi.useFakeTimers();
+      enrollAt(base.user.id, base.course.id, "2026-01-01T09:00:00.000Z");
+      postAt(base.course.id, "First", "2026-01-01T10:00:00.000Z");
+      postAt(base.course.id, "Third", "2026-03-01T10:00:00.000Z");
+      postAt(base.course.id, "Second", "2026-02-01T10:00:00.000Z");
+
+      const titles = getStudentAnnouncements(base.course.id, base.user.id).map(
+        (a) => a.title
+      );
+
+      expect(titles).toEqual(["Third", "Second", "First"]);
+    });
+
+    it("does not include announcements from other courses", () => {
+      const otherCourse = testDb
+        .insert(schema.courses)
+        .values({
+          title: "Other Course",
+          slug: "other-course",
+          description: "Another course",
+          salesCopy: "Sales copy",
+          instructorId: base.instructor.id,
+          categoryId: base.category.id,
+          status: schema.CourseStatus.Published,
+        })
+        .returning()
+        .get();
+
+      vi.useFakeTimers();
+      enrollAt(base.user.id, base.course.id, "2026-01-01T09:00:00.000Z");
+      enrollAt(base.user.id, otherCourse.id, "2026-01-01T09:00:00.000Z");
+      postAt(base.course.id, "Ours", "2026-01-01T10:00:00.000Z");
+      postAt(otherCourse.id, "Theirs", "2026-01-02T10:00:00.000Z");
+
+      expect(
+        getStudentAnnouncements(base.course.id, base.user.id).map((a) => a.title)
+      ).toEqual(["Ours"]);
+      expect(
+        getStudentAnnouncements(otherCourse.id, base.user.id).map((a) => a.title)
+      ).toEqual(["Theirs"]);
     });
   });
 });

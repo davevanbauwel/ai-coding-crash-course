@@ -1,6 +1,6 @@
-import { eq, desc } from "drizzle-orm";
+import { and, eq, desc, gte } from "drizzle-orm";
 import { db } from "~/db";
-import { announcements } from "~/db/schema";
+import { announcements, enrollments } from "~/db/schema";
 import {
   MAX_ANNOUNCEMENT_TITLE_LENGTH,
   MAX_ANNOUNCEMENT_BODY_LENGTH,
@@ -59,4 +59,33 @@ export function getCourseAnnouncements(courseId: number): Announcement[] {
     .where(eq(announcements.courseId, courseId))
     .orderBy(desc(announcements.createdAt), desc(announcements.id))
     .all();
+}
+
+/**
+ * Announcements a student can see: those posted at or after their enrollment,
+ * newest first. Empty when the user isn't enrolled in the course.
+ */
+export function getStudentAnnouncements(
+  courseId: number,
+  userId: number
+): Announcement[] {
+  return db
+    .select({ announcement: announcements })
+    .from(announcements)
+    .innerJoin(
+      enrollments,
+      and(
+        eq(enrollments.courseId, announcements.courseId),
+        eq(enrollments.userId, userId)
+      )
+    )
+    .where(
+      and(
+        eq(announcements.courseId, courseId),
+        gte(announcements.createdAt, enrollments.enrolledAt)
+      )
+    )
+    .orderBy(desc(announcements.createdAt), desc(announcements.id))
+    .all()
+    .map((row) => row.announcement);
 }

@@ -51,6 +51,12 @@ import {
 } from "~/services/courseRatingService";
 import { MAX_RATING, MIN_RATING } from "~/lib/ratings";
 import { StarRating, StarRatingInput } from "~/components/star-rating";
+import { getAccess } from "~/lib/access.server";
+import { renderComment } from "~/lib/comment-markdown.server";
+import {
+  getCourseAnnouncements,
+  getStudentAnnouncements,
+} from "~/services/announcementService";
 
 const ratingSchema = z.object({
   rating: z.coerce.number().int().min(MIN_RATING).max(MAX_RATING),
@@ -118,6 +124,23 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     : courseWithDetails.price;
   const tierInfo = getCountryTierInfo(country);
 
+  // Staff see every announcement, enrolled students only those since they
+  // enrolled, everyone else none. Bodies are untrusted Markdown, like comments.
+  const access = await getAccess(request, course.id);
+  const visibleAnnouncements = access.isStaff
+    ? getCourseAnnouncements(course.id)
+    : access.enrolled && access.userId
+      ? getStudentAnnouncements(course.id, access.userId)
+      : [];
+  const announcements = await Promise.all(
+    visibleAnnouncements.map(async (announcement) => ({
+      id: announcement.id,
+      title: announcement.title,
+      createdAt: announcement.createdAt,
+      bodyHtml: await renderComment(announcement.body),
+    }))
+  );
+
   return {
     course: courseWithDetails,
     salesCopyHtml,
@@ -131,6 +154,7 @@ export async function loader({ params, request }: Route.LoaderArgs) {
     tierInfo,
     ratingSummary,
     userRating,
+    announcements,
   };
 }
 
@@ -231,6 +255,7 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
     tierInfo,
     ratingSummary,
     userRating,
+    announcements,
   } = loaderData;
   const isInstructor = currentUserId === course.instructorId;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -383,6 +408,12 @@ export default function CourseDetail({ loaderData }: Route.ComponentProps) {
       <div className="grid gap-8 lg:grid-cols-3">
         {/* Left column: sales copy + course content */}
         <div className="lg:col-span-2">
+          {announcements.length > 0 && (
+            <div className="mb-8">
+              <CourseAnnouncements announcements={announcements} />
+            </div>
+          )}
+
           <div
             className="prose prose-neutral dark:prose-invert max-w-none"
             dangerouslySetInnerHTML={{ __html: salesCopyHtml }}
@@ -712,5 +743,49 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
         </div>
       </div>
     </div>
+  );
+}
+
+function CourseAnnouncements({
+  announcements,
+}: {
+  announcements: Array<{
+    id: number;
+    title: string;
+    createdAt: string;
+    bodyHtml: string;
+  }>;
+}) {
+  return (
+    <section>
+      <h2 className="mb-4 text-2xl font-bold">Announcements</h2>
+      <div className="space-y-4">
+        {announcements.map((announcement) => (
+          <Card key={announcement.id}>
+            <CardHeader>
+              <h3 className="font-semibold">{announcement.title}</h3>
+              <p
+                className="text-xs text-muted-foreground"
+                suppressHydrationWarning
+              >
+                {new Date(announcement.createdAt).toLocaleString(undefined, {
+                  year: "numeric",
+                  month: "short",
+                  day: "numeric",
+                  hour: "numeric",
+                  minute: "2-digit",
+                })}
+              </p>
+            </CardHeader>
+            <CardContent>
+              <div
+                className="prose prose-sm prose-neutral dark:prose-invert max-w-none"
+                dangerouslySetInnerHTML={{ __html: announcement.bodyHtml }}
+              />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </section>
   );
 }
